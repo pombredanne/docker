@@ -1,18 +1,26 @@
 # -*- mode: ruby -*-
 # vi: set ft=ruby :
 
+# If BUILDBOT_DOCKER shell environment variable is defined
+# (eg: export BUILDBOT_DOCKER=true), vagrant up will provision it on the VM
+
 def v10(config)
   config.vm.box = "quantal64_3.5.0-25"
   config.vm.box_url = "http://get.docker.io/vbox/ubuntu/12.10/quantal64_3.5.0-25.box"
-
-  config.vm.share_folder "v-data", "/opt/go/src/github.com/dotcloud/docker", File.dirname(__FILE__)
+  config.vm.network :hostonly, "192.168.33.10"
 
   # Ensure puppet is installed on the instance
   config.vm.provision :shell, :inline => "apt-get -qq update; apt-get install -y puppet"
 
   config.vm.provision :puppet do |puppet|
     puppet.manifests_path = "puppet/manifests"
-    puppet.manifest_file  = "quantal64.pp"
+    if not ENV['BUILDBOT_DOCKER']
+      config.vm.share_folder "v-data", "/opt/go/src/github.com/dotcloud/docker", File.dirname(__FILE__)
+      puppet.manifest_file  = "quantal64.pp"
+    else
+      config.vm.share_folder "v-data", "~/docker", File.dirname(__FILE__)
+      puppet.manifest_file  = "buildbot.pp"
+    end
     puppet.module_path = "puppet/modules"
   end
 end
