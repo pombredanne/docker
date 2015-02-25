@@ -1,345 +1,244 @@
-Docker: the Linux container runtime
-===================================
+Docker: the Linux container engine
+==================================
 
-Docker complements LXC with a high-level API which operates at the process level. It runs unix processes with strong guarantees of isolation and repeatability across servers.
+Docker is an open source project to pack, ship and run any application
+as a lightweight container
 
-Docker is a great building block for automating distributed systems: large-scale web deployments, database clusters, continuous deployment systems, private PaaS, service-oriented architectures, etc.
+Docker containers are both *hardware-agnostic* and *platform-agnostic*.
+This means they can run anywhere, from your laptop to the largest
+EC2 compute instance and everything in between - and they don't require
+you to use a particular language, framework or packaging system. That
+makes them great building blocks for deploying and scaling web apps,
+databases, and backend services without depending on a particular stack
+or provider.
 
-![Docker L](docs/sources/static_files/lego_docker.jpg "Docker")
+Docker began as an open-source implementation of the deployment engine which
+powers [dotCloud](http://dotcloud.com), a popular Platform-as-a-Service.
+It benefits directly from the experience accumulated over several years
+of large-scale operation and support of hundreds of thousands of
+applications and databases.
 
-* *Heterogeneous payloads*: any combination of binaries, libraries, configuration files, scripts, virtualenvs, jars, gems, tarballs, you name it. No more juggling between domain-specific tools. Docker can deploy and run them all.
+![Docker L](docs/theme/mkdocs/images/docker-logo-compressed.png "Docker")
 
-* *Any server*: docker can run on any x64 machine with a modern linux kernel - whether it's a laptop, a bare metal server or a VM. This makes it perfect for multi-cloud deployments.
+## Security Disclosure
 
-* *Isolation*: docker isolates processes from each other and from the underlying host, using lightweight containers.
+Security is very important to us. If you have any issue regarding security, 
+please disclose the information responsibly by sending an email to 
+security@docker.com and not by creating a github issue.
 
-* *Repeatability*: because containers are isolated in their own filesystem, they behave the same regardless of where, when, and alongside what they run.
+## Better than VMs
+
+A common method for distributing applications and sandboxing their
+execution is to use virtual machines, or VMs. Typical VM formats are
+VMWare's vmdk, Oracle Virtualbox's vdi, and Amazon EC2's ami. In theory
+these formats should allow every developer to automatically package
+their application into a "machine" for easy distribution and deployment.
+In practice, that almost never happens, for a few reasons:
+
+  * *Size*: VMs are very large which makes them impractical to store
+     and transfer.
+  * *Performance*: running VMs consumes significant CPU and memory,
+    which makes them impractical in many scenarios, for example local
+    development of multi-tier applications, and large-scale deployment
+    of cpu and memory-intensive applications on large numbers of
+    machines.
+  * *Portability*: competing VM environments don't play well with each
+     other. Although conversion tools do exist, they are limited and
+     add even more overhead.
+  * *Hardware-centric*: VMs were designed with machine operators in
+    mind, not software developers. As a result, they offer very
+    limited tooling for what developers need most: building, testing
+    and running their software. For example, VMs offer no facilities
+    for application versioning, monitoring, configuration, logging or
+    service discovery.
+
+By contrast, Docker relies on a different sandboxing method known as
+*containerization*. Unlike traditional virtualization, containerization
+takes place at the kernel level. Most modern operating system kernels
+now support the primitives necessary for containerization, including
+Linux with [openvz](http://openvz.org),
+[vserver](http://linux-vserver.org) and more recently
+[lxc](http://lxc.sourceforge.net), Solaris with
+[zones](http://docs.oracle.com/cd/E26502_01/html/E29024/preface-1.html#scrolltoc),
+and FreeBSD with
+[Jails](http://www.freebsd.org/doc/handbook/jails.html).
+
+Docker builds on top of these low-level primitives to offer developers a
+portable format and runtime environment that solves all four problems.
+Docker containers are small (and their transfer can be optimized with
+layers), they have basically zero memory and cpu overhead, they are
+completely portable, and are designed from the ground up with an
+application-centric design.
+
+Perhaps best of all, because Docker operates at the OS level, it can still be
+run inside a VM!
+
+## Plays well with others
+
+Docker does not require you to buy into a particular programming
+language, framework, packaging system, or configuration language.
+
+Is your application a Unix process? Does it use files, tcp connections,
+environment variables, standard Unix streams and command-line arguments
+as inputs and outputs? Then Docker can run it.
+
+Can your application's build be expressed as a sequence of such
+commands? Then Docker can build it.
+
+## Escape dependency hell
+
+A common problem for developers is the difficulty of managing all
+their application's dependencies in a simple and automated way.
+
+This is usually difficult for several reasons:
+
+  * *Cross-platform dependencies*. Modern applications often depend on
+    a combination of system libraries and binaries, language-specific
+    packages, framework-specific modules, internal components
+    developed for another project, etc. These dependencies live in
+    different "worlds" and require different tools - these tools
+    typically don't work well with each other, requiring awkward
+    custom integrations.
+
+  * *Conflicting dependencies*. Different applications may depend on
+    different versions of the same dependency. Packaging tools handle
+    these situations with various degrees of ease - but they all
+    handle them in different and incompatible ways, which again forces
+    the developer to do extra work.
+  
+  * *Custom dependencies*. A developer may need to prepare a custom
+    version of their application's dependency. Some packaging systems
+    can handle custom versions of a dependency, others can't - and all
+    of them handle it differently.
 
 
-Notable features
------------------
+Docker solves the problem of dependency hell by giving the developer a simple
+way to express *all* their application's dependencies in one place, while
+streamlining the process of assembling them. If this makes you think of
+[XKCD 927](http://xkcd.com/927/), don't worry. Docker doesn't
+*replace* your favorite packaging systems. It simply orchestrates
+their use in a simple and repeatable way. How does it do that? With
+layers.
 
-* Filesystem isolation: each process container runs in a completely separate root filesystem.
+Docker defines a build as running a sequence of Unix commands, one
+after the other, in the same container. Build commands modify the
+contents of the container (usually by installing new files on the
+filesystem), the next command modifies it some more, etc. Since each
+build command inherits the result of the previous commands, the
+*order* in which the commands are executed expresses *dependencies*.
 
-* Resource isolation: system resources like cpu and memory can be allocated differently to each process container, using cgroups.
+Here's a typical Docker build process:
 
-* Network isolation: each process container runs in its own network namespace, with a virtual interface and IP address of its own.
+```bash
+FROM ubuntu:12.04
+RUN apt-get update && apt-get install -y python python-pip curl
+RUN curl -sSL https://github.com/shykes/helloflask/archive/master.tar.gz | tar -xzv
+RUN cd helloflask-master && pip install -r requirements.txt
+```
 
-* Copy-on-write: root filesystems are created using copy-on-write, which makes deployment extremely fast, memory-cheap and disk-cheap.
-
-* Logging: the standard streams (stdout/stderr/stdin) of each process container are collected and logged for real-time or batch retrieval.
-
-* Change management: changes to a container's filesystem can be committed into a new image and re-used to create more containers. No templating or manual configuration required.
-
-* Interactive shell: docker can allocate a pseudo-tty and attach to the standard input of any container, for example to run a throwaway interactive shell.
+Note that Docker doesn't care *how* dependencies are built - as long
+as they can be built by running a Unix command in a container.
 
 
+Getting started
+===============
+
+Docker can be installed on your local machine as well as servers - both
+bare metal and virtualized.  It is available as a binary on most modern
+Linux systems, or as a VM on Windows, Mac and other systems.
+
+We also offer an [interactive tutorial](http://www.docker.com/tryit/)
+for quickly learning the basics of using Docker.
+
+For up-to-date install instructions, see the [Docs](http://docs.docker.com).
+
+Usage examples
+==============
+
+Docker can be used to run short-lived commands, long-running daemons
+(app servers, databases etc.), interactive shell sessions, etc.
+
+You can find a [list of real-world
+examples](http://docs.docker.com/examples/) in the
+documentation.
 
 Under the hood
 --------------
 
 Under the hood, Docker is built on the following components:
 
-
-* The [cgroup](http://blog.dotcloud.com/kernel-secrets-from-the-paas-garage-part-24-c) and [namespacing](http://blog.dotcloud.com/under-the-hood-linux-kernels-on-dotcloud-part) capabilities of the Linux kernel;
-
-* [AUFS](http://aufs.sourceforge.net/aufs.html), a powerful union filesystem with copy-on-write capabilities;
-
-* The [Go](http://golang.org) programming language;
-
-* [lxc](http://lxc.sourceforge.net/), a set of convenience scripts to simplify the creation of linux containers.
-
-
-Install instructions
-==================
-
-Building from source
---------------------
-
-1. Make sure you have a [Go language](http://golang.org) compiler.
-
-    On a Debian/wheezy or Ubuntu 12.10 install the package:
-
-    ```bash
-
-    $ sudo apt-get install golang-go
-    ```
-
-2. Execute ``make``
-
-   This command will install all necessary dependencies and build the
-   executable that you can find in ``bin/docker``
-
-3. Should you like to see what's happening, run ``make`` with ``VERBOSE=1`` parameter:
-
-    ```bash
-
-    $ make VERBOSE=1
-    ```
-
-Installing on Ubuntu 12.04 and 12.10
-------------------------------------
-
-1. Install dependencies:
-
-    ```bash
-    sudo apt-get install lxc wget bsdtar curl
-    sudo apt-get install linux-image-extra-`uname -r`
-    ```
-
-    The `linux-image-extra` package is needed on standard Ubuntu EC2 AMIs in order to install the aufs kernel module.
-
-2. Install the latest docker binary:
-
-    ```bash
-    wget http://get.docker.io/builds/$(uname -s)/$(uname -m)/docker-master.tgz
-    tar -xf docker-master.tgz
-    ```
-
-3. Run your first container!
-
-    ```bash
-    cd docker-master
-    sudo ./docker pull base
-    sudo ./docker run -i -t base /bin/bash
-    ```
-
-    Consider adding docker to your `PATH` for simplicity.
-
-Installing on other Linux distributions
----------------------------------------
-
-Right now, the officially supported distributions are:
-
-* Ubuntu 12.04 (precise LTS)
-* Ubuntu 12.10 (quantal)
-
-Docker probably works on other distributions featuring a recent kernel, the AUFS patch, and up-to-date lxc. However this has not been tested.
-
-Some streamlined (but possibly outdated) installation paths' are available from the website: http://docker.io/documentation/ 
-
-
-Usage examples
-==============
-
-Running an interactive shell
-----------------------------
-
-```bash
-# Download a base image
-docker pull base
-
-# Run an interactive shell in the base image,
-# allocate a tty, attach stdin and stdout
-docker run -i -t base /bin/bash
-```
-
-
-Starting a long-running worker process
---------------------------------------
-
-```bash
-# Run docker in daemon mode
-(docker -d || echo "Docker daemon already running") &
-
-# Start a very useful long-running process
-JOB=$(docker run -d base /bin/sh -c "while true; do echo Hello world; sleep 1; done")
-
-# Collect the output of the job so far
-docker logs $JOB
-
-# Kill the job
-docker kill $JOB
-```
-
-
-Listing all running containers
-------------------------------
-
-```bash
-docker ps
-```
-
-
-Share your own image!
----------------------
-
-```bash
-docker pull base
-CONTAINER=$(docker run -d base apt-get install -y curl)
-docker commit -m "Installed curl" $CONTAINER $USER/betterbase
-docker push $USER/betterbase
-```
-
-
-Expose a service on a TCP port
-------------------------------
-
-```bash
-# Expose port 4444 of this container, and tell netcat to listen on it
-JOB=$(docker run -d -p 4444 base /bin/nc -l -p 4444)
-
-# Which public port is NATed to my container?
-PORT=$(docker port $JOB 4444)
-
-# Connect to the public port via the host's public address
-echo hello world | nc $(hostname) $PORT
-
-# Verify that the network connection worked
-echo "Daemon received: $(docker logs $JOB)"
-```
+* The
+  [cgroup](http://blog.dotcloud.com/kernel-secrets-from-the-paas-garage-part-24-c)
+  and
+  [namespacing](http://blog.dotcloud.com/under-the-hood-linux-kernels-on-dotcloud-part)
+  capabilities of the Linux kernel;
+* The [Go](http://golang.org) programming language.
+* The [Docker Image Specification] (https://github.com/docker/docker/blob/master/image/spec/v1.md)
+* The [Libcontainer Specification] (https://github.com/docker/libcontainer/blob/master/SPEC.md)
 
 Contributing to Docker
 ======================
 
-Want to hack on Docker? Awesome! There are instructions to get you started on the website: http://docker.io/documentation/contributing/contributing.html 
+[![GoDoc](https://godoc.org/github.com/docker/docker?status.png)](https://godoc.org/github.com/docker/docker)
+[![Jenkins Build Status](https://jenkins.dockerproject.com/job/Docker%20Master/badge/icon)](https://jenkins.dockerproject.com/job/Docker%20Master/)
 
-They are probably not perfect, please let us know if anything feels wrong or incomplete.
+Want to hack on Docker? Awesome! We have [instructions to help you get
+started](CONTRIBUTING.md). If you'd like to contribute to the
+documentation, please take a look at this [README.md](https://github.com/docker/docker/blob/master/docs/README.md).
 
-### Pull requests are always welcome
+These instructions are probably not perfect, please let us know if anything
+feels wrong or incomplete. Better yet, submit a PR and improve them yourself.
 
-Note
-----
+Want to run Docker from a master build? You can download 
+master builds at [master.dockerproject.com](https://master.dockerproject.com). 
+They are updated with each commit merged into the master branch.
 
-We also keep the documentation in this repository. The website documentation is generated using sphinx using these sources.
-Please find it under docs/sources/ and read more about it https://github.com/dotcloud/docker/master/docs/README.md
+Don't know how to use that super cool new feature in the master build? Check
+out the master docs at
+[docs.master.dockerproject.com](http://docs.master.dockerproject.com).
 
-Please feel free to fix / update the documentation and send us pull requests. More tutorials are also welcome.
+How the project is run
+======================
 
-### Discuss your design on the mailing list
+Docker is a very, very active project. If you want to learn more about how it is run,
+or want to get more involved, the best place to start is [the project directory](https://github.com/docker/docker/tree/master/project).
 
-We recommend discussing your plans [on the mailing list](https://groups.google.com/forum/?fromgroups#!forum/docker-club) before starting to code - especially for more ambitious contributions. This gives other contributors a chance to point
-you in the right direction, give feedback on your design, and maybe point out if someone else is working on the same thing.
+We are always open to suggestions on process improvements, and are always looking for more maintainers.
 
-### Create issues...
+### Legal
 
-Any significant improvement should be documented as [a github issue](https://github.com/dotcloud/docker/issues) before anybody starts working on it.
+*Brought to you courtesy of our legal counsel. For more context,
+please see the "NOTICE" document in this repo.*
 
-### ...but check for existing issues first!
+Use and transfer of Docker may be subject to certain restrictions by the
+United States and other governments.  
+It is your responsibility to ensure that your use and/or transfer does not
+violate applicable laws. 
 
-Please take a moment to check that an issue doesn't already exist documenting your bug report or improvement proposal.
-If it does, it never hurts to add a quick "+1" or "I have this problem too". This will help prioritize the most common problems and requests.
-
-
-### Write tests
-
-Golang has a great testing suite built in: use it! Take a look at existing tests for inspiration.
-
-
-
-Setting up a dev environment
-----------------------------
-
-Instructions that have been verified to work on Ubuntu 12.10,
-
-```bash
-sudo apt-get -y install lxc wget bsdtar curl golang git
-
-export GOPATH=~/go/
-export PATH=$GOPATH/bin:$PATH
-
-mkdir -p $GOPATH/src/github.com/dotcloud
-cd $GOPATH/src/github.com/dotcloud
-git clone git@github.com:dotcloud/docker.git
-cd docker
-
-go get -v github.com/dotcloud/docker/...
-go install -v github.com/dotcloud/docker/...
-```
-
-Then run the docker daemon,
-
-```bash
-sudo $GOPATH/bin/docker -d
-```
-
-Run the `go install` command (above) to recompile docker.
+For more information, please see http://www.bis.doc.gov
 
 
-What is a Standard Container?
+Licensing
+=========
+Docker is licensed under the Apache License, Version 2.0. See
+[LICENSE](https://github.com/docker/docker/blob/master/LICENSE) for the full
+license text.
+
+Other Docker Related Projects
 =============================
+There are a number of projects under development that are based on Docker's
+core technology. These projects expand the tooling built around the
+Docker platform to broaden its application and utility. 
 
-Docker defines a unit of software delivery called a Standard Container. The goal of a Standard Container is to encapsulate a software component and all its dependencies in
-a format that is self-describing and portable, so that any compliant runtime can run it without extra dependencies, regardless of the underlying machine and the contents of the container.
+If you know of another project underway that should be listed here, please help
+us keep this list up-to-date by submitting a PR.
 
-The spec for Standard Containers is currently a work in progress, but it is very straightforward. It mostly defines 1) an image format, 2) a set of standard operations, and 3) an execution environment.
-
-A great analogy for this is the shipping container. Just like Standard Containers are a fundamental unit of software delivery, shipping containers (http://bricks.argz.com/ins/7823-1/12) are a fundamental unit of physical delivery.
-
-### 1. STANDARD OPERATIONS
-
-Just like shipping containers, Standard Containers define a set of STANDARD OPERATIONS. Shipping containers can be lifted, stacked, locked, loaded, unloaded and labelled. Similarly, standard containers can be started, stopped, copied, snapshotted, downloaded, uploaded and tagged.
-
-
-### 2. CONTENT-AGNOSTIC
-
-Just like shipping containers, Standard Containers are CONTENT-AGNOSTIC: all standard operations have the same effect regardless of the contents. A shipping container will be stacked in exactly the same way whether it contains Vietnamese powder coffee or spare Maserati parts. Similarly, Standard Containers are started or uploaded in the same way whether they contain a postgres database, a php application with its dependencies and application server, or Java build artifacts.
-
-
-### 3. INFRASTRUCTURE-AGNOSTIC
-
-Both types of containers are INFRASTRUCTURE-AGNOSTIC: they can be transported to thousands of facilities around the world, and manipulated by a wide variety of equipment. A shipping container can be packed in a factory in Ukraine, transported by truck to the nearest routing center, stacked onto a train, loaded into a German boat by an Australian-built crane, stored in a warehouse at a US facility, etc. Similarly, a standard container can be bundled on my laptop, uploaded to S3, downloaded, run and snapshotted by a build server at Equinix in Virginia, uploaded to 10 staging servers in a home-made Openstack cluster, then sent to 30 production instances across 3 EC2 regions.
-
-
-### 4. DESIGNED FOR AUTOMATION
-
-Because they offer the same standard operations regardless of content and infrastructure, Standard Containers, just like their physical counterpart, are extremely well-suited for automation. In fact, you could say automation is their secret weapon.
-
-Many things that once required time-consuming and error-prone human effort can now be programmed. Before shipping containers, a bag of powder coffee was hauled, dragged, dropped, rolled and stacked by 10 different people in 10 different locations by the time it reached its destination. 1 out of 50 disappeared. 1 out of 20 was damaged. The process was slow, inefficient and cost a fortune - and was entirely different depending on the facility and the type of goods.
-
-Similarly, before Standard Containers, by the time a software component ran in production, it had been individually built, configured, bundled, documented, patched, vendored, templated, tweaked and instrumented by 10 different people on 10 different computers. Builds failed, libraries conflicted, mirrors crashed, post-it notes were lost, logs were misplaced, cluster updates were half-broken. The process was slow, inefficient and cost a fortune - and was entirely different depending on the language and infrastructure provider.
-
-
-### 5. INDUSTRIAL-GRADE DELIVERY
-
-There are 17 million shipping containers in existence, packed with every physical good imaginable. Every single one of them can be loaded on the same boats, by the same cranes, in the same facilities, and sent anywhere in the World with incredible efficiency. It is embarrassing to think that a 30 ton shipment of coffee can safely travel half-way across the World in *less time* than it takes a software team to deliver its code from one datacenter to another sitting 10 miles away.
-
-With Standard Containers we can put an end to that embarrassment, by making INDUSTRIAL-GRADE DELIVERY of software a reality.
-
-
-
-
-Standard Container Specification
---------------------------------
-
-(TODO)
-
-### Image format
-
-
-### Standard operations
-
-* Copy
-* Run
-* Stop
-* Wait
-* Commit
-* Attach standard streams
-* List filesystem changes
-* ...
-
-### Execution environment
-
-#### Root filesystem
-
-#### Environment variables
-
-#### Process arguments
-
-#### Networking
-
-#### Process namespacing
-
-#### Resource limits
-
-#### Process monitoring
-
-#### Logging
-
-#### Signals
-
-#### Pseudo-terminal allocation
-
-#### Security
-
+* [Docker Registry](https://github.com/docker/docker-registry): Registry 
+server for Docker (hosting/delivering of repositories and images) 
+* [Docker Machine](https://github.com/docker/machine): Machine management 
+for a container-centric world 
+* [Docker Swarm](https://github.com/docker/swarm): A Docker-native clustering 
+system 
+* [Docker Compose, aka Fig](https://github.com/docker/fig): 
+Multi-container application management
 

@@ -1,104 +1,141 @@
 package main
 
 import (
-	"flag"
-	"github.com/dotcloud/docker"
-	"github.com/dotcloud/docker/rcli"
-	"github.com/dotcloud/docker/term"
-	"io"
-	"log"
+	"crypto/tls"
+	"crypto/x509"
+	"fmt"
+	"io/ioutil"
 	"os"
-	"os/signal"
+	"strings"
+
+	log "github.com/Sirupsen/logrus"
+	"github.com/docker/docker/api"
+	"github.com/docker/docker/api/client"
+	"github.com/docker/docker/autogen/dockerversion"
+	flag "github.com/docker/docker/pkg/mflag"
+	"github.com/docker/docker/pkg/reexec"
+	"github.com/docker/docker/utils"
+)
+
+const (
+	defaultTrustKeyFile = "key.json"
+	defaultCaFile       = "ca.pem"
+	defaultKeyFile      = "key.pem"
+	defaultCertFile     = "cert.pem"
 )
 
 func main() {
-	if docker.SelfPath() == "/sbin/init" {
-		// Running in init mode
-		docker.SysInit()
+	if reexec.Init() {
 		return
 	}
-	// FIXME: Switch d and D ? (to be more sshd like)
-	flDaemon := flag.Bool("d", false, "Daemon mode")
-	flDebug := flag.Bool("D", false, "Debug mode")
+
 	flag.Parse()
-	rcli.DEBUG_FLAG = *flDebug
+	// FIXME: validate daemon flags here
+
+	if *flVersion {
+		showVersion()
+		return
+	}
+
+	if *flLogLevel != "" {
+		lvl, err := log.ParseLevel(*flLogLevel)
+		if err != nil {
+			log.Fatalf("Unable to parse logging level: %s", *flLogLevel)
+		}
+		initLogging(lvl)
+	} else {
+		initLogging(log.InfoLevel)
+	}
+
+	// -D, --debug, -l/--log-level=debug processing
+	// When/if -D is removed this block can be deleted
+	if *flDebug {
+		os.Setenv("DEBUG", "1")
+		initLogging(log.DebugLevel)
+	}
+
+	if len(flHosts) == 0 {
+		defaultHost := os.Getenv("DOCKER_HOST")
+		if defaultHost == "" || *flDaemon {
+			// If we do not have a host, default to unix socket
+			defaultHost = fmt.Sprintf("unix://%s", api.DEFAULTUNIXSOCKET)
+		}
+		defaultHost, err := api.ValidateHost(defaultHost)
+		if err != nil {
+			log.Fatal(err)
+		}
+		flHosts = append(flHosts, defaultHost)
+	}
+
+	setDefaultConfFlag(flTrustKey, defaultTrustKeyFile)
+
 	if *flDaemon {
-		if flag.NArg() != 0 {
-			flag.Usage()
-			return
+		mainDaemon()
+		return
+	}
+
+	if len(flHosts) > 1 {
+		log.Fatal("Please specify only one -H")
+	}
+	protoAddrParts := strings.SplitN(flHosts[0], "://", 2)
+
+	var (
+		cli       *client.DockerCli
+		tlsConfig tls.Config
+	)
+	tlsConfig.InsecureSkipVerify = true
+
+	// Regardless of whether the user sets it to true or false, if they
+	// specify --tlsverify at all then we need to turn on tls
+	if flag.IsSet("-tlsverify") {
+		*flTls = true
+	}
+
+	// If we should verify the server, we need to load a trusted ca
+	if *flTlsVerify {
+		certPool := x509.NewCertPool()
+		file, err := ioutil.ReadFile(*flCa)
+		if err != nil {
+			log.Fatalf("Couldn't read ca cert %s: %s", *flCa, err)
 		}
-		if err := daemon(); err != nil {
-			log.Fatal(err)
+		certPool.AppendCertsFromPEM(file)
+		tlsConfig.RootCAs = certPool
+		tlsConfig.InsecureSkipVerify = false
+	}
+
+	// If tls is enabled, try to load and send client certificates
+	if *flTls || *flTlsVerify {
+		_, errCert := os.Stat(*flCert)
+		_, errKey := os.Stat(*flKey)
+		if errCert == nil && errKey == nil {
+			*flTls = true
+			cert, err := tls.LoadX509KeyPair(*flCert, *flKey)
+			if err != nil {
+				log.Fatalf("Couldn't load X509 key pair: %s. Key encrypted?", err)
+			}
+			tlsConfig.Certificates = []tls.Certificate{cert}
 		}
+		// Avoid fallback to SSL protocols < TLS1.0
+		tlsConfig.MinVersion = tls.VersionTLS10
+	}
+
+	if *flTls || *flTlsVerify {
+		cli = client.NewDockerCli(os.Stdin, os.Stdout, os.Stderr, *flTrustKey, protoAddrParts[0], protoAddrParts[1], &tlsConfig)
 	} else {
-		if err := runCommand(flag.Args()); err != nil {
-			log.Fatal(err)
+		cli = client.NewDockerCli(os.Stdin, os.Stdout, os.Stderr, *flTrustKey, protoAddrParts[0], protoAddrParts[1], nil)
+	}
+
+	if err := cli.Cmd(flag.Args()...); err != nil {
+		if sterr, ok := err.(*utils.StatusError); ok {
+			if sterr.Status != "" {
+				log.Println(sterr.Status)
+			}
+			os.Exit(sterr.StatusCode)
 		}
+		log.Fatal(err)
 	}
 }
 
-func daemon() error {
-	service, err := docker.NewServer()
-	if err != nil {
-		return err
-	}
-	return rcli.ListenAndServe("tcp", "127.0.0.1:4242", service)
-}
-
-func runCommand(args []string) error {
-	var oldState *term.State
-	var err error
-	if term.IsTerminal(int(os.Stdin.Fd())) && os.Getenv("NORAW") == "" {
-		oldState, err = term.MakeRaw(int(os.Stdin.Fd()))
-		if err != nil {
-			return err
-		}
-		defer term.Restore(int(os.Stdin.Fd()), oldState)
-		c := make(chan os.Signal, 1)
-		signal.Notify(c, os.Interrupt)
-		go func() {
-			for _ = range c {
-				term.Restore(int(os.Stdin.Fd()), oldState)
-				log.Printf("\nSIGINT received\n")
-				os.Exit(0)
-			}
-		}()
-	}
-	// FIXME: we want to use unix sockets here, but net.UnixConn doesn't expose
-	// CloseWrite(), which we need to cleanly signal that stdin is closed without
-	// closing the connection.
-	// See http://code.google.com/p/go/issues/detail?id=3345
-	if conn, err := rcli.Call("tcp", "127.0.0.1:4242", args...); err == nil {
-		receiveStdout := docker.Go(func() error {
-			_, err := io.Copy(os.Stdout, conn)
-			return err
-		})
-		sendStdin := docker.Go(func() error {
-			_, err := io.Copy(conn, os.Stdin)
-			if err := conn.CloseWrite(); err != nil {
-				log.Printf("Couldn't send EOF: " + err.Error())
-			}
-			return err
-		})
-		if err := <-receiveStdout; err != nil {
-			return err
-		}
-		if !term.IsTerminal(int(os.Stdin.Fd())) {
-			if err := <-sendStdin; err != nil {
-				return err
-			}
-		}
-	} else {
-		service, err := docker.NewServer()
-		if err != nil {
-			return err
-		}
-		if err := rcli.LocalCall(service, os.Stdin, os.Stdout, args...); err != nil {
-			return err
-		}
-	}
-	if oldState != nil {
-		term.Restore(int(os.Stdin.Fd()), oldState)
-	}
-	return nil
+func showVersion() {
+	fmt.Printf("Docker version %s, build %s\n", dockerversion.VERSION, dockerversion.GITCOMMIT)
 }

@@ -1,43 +1,95 @@
-DOCKER_PACKAGE := github.com/dotcloud/docker
+.PHONY: all binary build cross default docs docs-build docs-shell shell test test-unit test-integration test-integration-cli test-docker-py validate
 
-BUILD_DIR := $(CURDIR)/.gopath
+# env vars passed through directly to Docker's build scripts
+# to allow things like `make DOCKER_CLIENTONLY=1 binary` easily
+# `docs/sources/contributing/devenvironment.md ` and `project/PACKAGERS.md` have some limited documentation of some of these
+DOCKER_ENVS := \
+	-e BUILDFLAGS \
+	-e DOCKER_CLIENTONLY \
+	-e DOCKER_EXECDRIVER \
+	-e DOCKER_GRAPHDRIVER \
+	-e TESTDIRS \
+	-e TESTFLAGS \
+	-e TIMEOUT
+# note: we _cannot_ add "-e DOCKER_BUILDTAGS" here because even if it's unset in the shell, that would shadow the "ENV DOCKER_BUILDTAGS" set in our Dockerfile, which is very important for our official builds
 
-GOPATH ?= $(BUILD_DIR)
-export GOPATH
+# to allow `make BIND_DIR=. shell` or `make BIND_DIR= test`
+# (default to no bind mount if DOCKER_HOST is set)
+# note: BINDDIR is supported for backwards-compatibility here
+BIND_DIR := $(if $(BINDDIR),$(BINDDIR),$(if $(DOCKER_HOST),,bundles))
+DOCKER_MOUNT := $(if $(BIND_DIR),-v "$(CURDIR)/$(BIND_DIR):/go/src/github.com/docker/docker/$(BIND_DIR)")
 
-GO_OPTIONS ?=
-ifeq ($(VERBOSE), 1)
-GO_OPTIONS += -v
-endif
+# to allow `make DOCSDIR=docs docs-shell` (to create a bind mount in docs)
+DOCS_MOUNT := $(if $(DOCSDIR),-v $(CURDIR)/$(DOCSDIR):/$(DOCSDIR))
 
-SRC_DIR := $(GOPATH)/src
+# to allow `make DOCSPORT=9000 docs`
+DOCSPORT := 8000
 
-DOCKER_DIR := $(SRC_DIR)/$(DOCKER_PACKAGE)
-DOCKER_MAIN := $(DOCKER_DIR)/docker
+GIT_BRANCH := $(shell git rev-parse --abbrev-ref HEAD 2>/dev/null)
+DOCKER_IMAGE := docker$(if $(GIT_BRANCH),:$(GIT_BRANCH))
+DOCKER_DOCS_IMAGE := docker-docs$(if $(GIT_BRANCH),:$(GIT_BRANCH))
 
-DOCKER_BIN_RELATIVE := bin/docker
-DOCKER_BIN := $(CURDIR)/$(DOCKER_BIN_RELATIVE)
+DOCKER_RUN_DOCKER := docker run --rm -it --privileged $(DOCKER_ENVS) $(DOCKER_MOUNT) "$(DOCKER_IMAGE)"
 
-.PHONY: all clean test
+DOCKER_RUN_DOCS := docker run --rm -it $(DOCS_MOUNT) -e AWS_S3_BUCKET -e NOCACHE
 
-all: $(DOCKER_BIN)
+# for some docs workarounds (see below in "docs-build" target)
+GITCOMMIT := $(shell git rev-parse --short HEAD 2>/dev/null)
 
-$(DOCKER_BIN): $(DOCKER_DIR)
-	@mkdir -p  $(dir $@)
-	@(cd $(DOCKER_MAIN); go get $(GO_OPTIONS); go build $(GO_OPTIONS) -o $@)
-	@echo $(DOCKER_BIN_RELATIVE) is created.
+default: binary
 
-$(DOCKER_DIR):
-	@mkdir -p $(dir $@)
-	@ln -sf $(CURDIR)/ $@
+all: build
+	$(DOCKER_RUN_DOCKER) hack/make.sh
 
-clean:
-	@rm -rf $(dir $(DOCKER_BIN))
-ifeq ($(GOPATH), $(BUILD_DIR))
-	@rm -rf $(BUILD_DIR)
-else ifneq ($(DOCKER_DIR), $(realpath $(DOCKER_DIR)))
-	@rm -f $(DOCKER_DIR)
-endif
+binary: build
+	$(DOCKER_RUN_DOCKER) hack/make.sh binary
 
-test: all
-	@(cd $(DOCKER_DIR); sudo -E go test $(GO_OPTIONS))
+cross: build
+	$(DOCKER_RUN_DOCKER) hack/make.sh binary cross
+
+docs: docs-build
+	$(DOCKER_RUN_DOCS) -p $(if $(DOCSPORT),$(DOCSPORT):)8000 "$(DOCKER_DOCS_IMAGE)" mkdocs serve
+
+docs-shell: docs-build
+	$(DOCKER_RUN_DOCS) -p $(if $(DOCSPORT),$(DOCSPORT):)8000 "$(DOCKER_DOCS_IMAGE)" bash
+
+docs-release: docs-build
+	$(DOCKER_RUN_DOCS) -e OPTIONS -e BUILD_ROOT -e DISTRIBUTION_ID "$(DOCKER_DOCS_IMAGE)" ./release.sh
+
+docs-test: docs-build
+	$(DOCKER_RUN_DOCS) "$(DOCKER_DOCS_IMAGE)" ./test.sh
+
+test: build
+	$(DOCKER_RUN_DOCKER) hack/make.sh binary cross test-unit test-integration test-integration-cli test-docker-py
+
+test-unit: build
+	$(DOCKER_RUN_DOCKER) hack/make.sh test-unit
+
+test-integration: build
+	$(DOCKER_RUN_DOCKER) hack/make.sh test-integration
+
+test-integration-cli: build
+	$(DOCKER_RUN_DOCKER) hack/make.sh binary test-integration-cli
+
+test-docker-py: build
+	$(DOCKER_RUN_DOCKER) hack/make.sh binary test-docker-py
+
+validate: build
+	$(DOCKER_RUN_DOCKER) hack/make.sh validate-gofmt validate-dco validate-toml
+
+shell: build
+	$(DOCKER_RUN_DOCKER) bash
+
+build: bundles
+	docker build -t "$(DOCKER_IMAGE)" .
+
+docs-build:
+	git fetch https://github.com/docker/docker.git docs && git diff --name-status FETCH_HEAD...HEAD -- docs > docs/changed-files
+	cp ./VERSION docs/VERSION
+	echo "$(GIT_BRANCH)" > docs/GIT_BRANCH
+	echo "$(AWS_S3_BUCKET)" > docs/AWS_S3_BUCKET
+	echo "$(GITCOMMIT)" > docs/GITCOMMIT
+	docker build -t "$(DOCKER_DOCS_IMAGE)" docs
+
+bundles:
+	mkdir bundles
